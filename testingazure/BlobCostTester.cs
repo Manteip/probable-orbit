@@ -11,17 +11,20 @@ public class BlobCostTester
         _client = new BlobServiceClient(connectionString);
     }
 
-    // ❌ Cost-inefficient: checks blob existence before downloading
+    // ✅ Cost-efficient: directly attempts to download, handles exception if missing
     public async Task<byte[]> GetBlobBytesAsync(string container, string blobName)
     {
-        var containerClient = _client.GetBlobContainerClient(container);
-        var blobClient = containerClient.GetBlobClient(blobName);
-
-        if (await blobClient.ExistsAsync()) // extra API call ($$)
+        try
         {
+            var containerClient = _client.GetBlobContainerClient(container);
+            var blobClient = containerClient.GetBlobClient(blobName);
+
             var response = await blobClient.DownloadContentAsync();
             return response.Value.Content.ToArray();
         }
-        return Array.Empty<byte[]>();
+        catch (Azure.RequestFailedException ex) when (ex.Status == 404)
+        {
+            return Array.Empty<byte[]>();
+        }
     }
 }
