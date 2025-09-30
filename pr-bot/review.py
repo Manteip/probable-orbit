@@ -1,35 +1,27 @@
-import os
-import re
-import json
-import requests
-import textwrap
-from typing import List, Dict, Optional
+import os, json, requests, textwrap
+from typing import List, Dict
 from openai import AzureOpenAI
 
-# ---------- GitHub context ----------
+# --- GitHub context ---
 GITHUB_API = "https://api.github.com"
 REPO = os.getenv("REPO")
 PR_NUMBER = os.getenv("PR_NUMBER")
 TOKEN = os.getenv("GITHUB_TOKEN")
 RUN_MODE = os.getenv("RUN_MODE", "summary").lower()  # "summary" | "inline"
-FILTER_PREFIX = os.getenv("FILTER_PREFIX", "").strip()  # optional path prefix filter, e.g. "testingazure/"
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github+json",
+    "Accept": "application/vnd.github+json"
 }
 
 PROMPT_PATH = "prompts/azure_cost_review.md"
-BOT_MARKER = "<!-- pr-cost-review-bot -->"  # single-comment anchor
 
-# ---------- Azure OpenAI ----------
+# --- Azure OpenAI ---
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 AZURE_OPENAI_CHAT_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini")
 
-
-# ---------------- HTTP helpers ----------------
 def gh_get(path, params=None):
     r = requests.get(f"{GITHUB_API}{path}", headers=HEADERS, params=params)
     r.raise_for_status()
@@ -40,31 +32,18 @@ def gh_post(path, payload):
     r.raise_for_status()
     return r.json()
 
-def gh_patch(full_url, payload):
-    r = requests.patch(full_url, headers=HEADERS, json=payload)
-    r.raise_for_status()
-    return r.json()
-
-
-# ---------------- PR files ----------------
 def get_pr_files() -> List[Dict]:
-    files: List[Dict] = []
+    files = []
     page = 1
     while True:
-        batch = gh_get(
-            f"/repos/{REPO}/pulls/{PR_NUMBER}/files",
-            params={"per_page": 100, "page": page},
-        )
-        if FILTER_PREFIX:
-            batch = [f for f in batch if f.get("filename", "").startswith(FILTER_PREFIX)]
+        batch = gh_get(f"/repos/{REPO}/pulls/{PR_NUMBER}/files",
+                       params={"per_page": 100, "page": page})
         files.extend(batch)
         if len(batch) < 100:
             break
         page += 1
     return files
 
-
-# ---------------- Prompt + model IO ----------------
 def load_prompt() -> str:
     with open(PROMPT_PATH, "r", encoding="utf-8") as f:
         return f.read()
@@ -112,9 +91,7 @@ def call_model(prompt: str) -> str:
       - Reference (brief best-practice note)
     """).strip()
 
-    mode_hint = "Produce inline JSON comments only." if RUN_MODE == "inline" \
-        else "Produce a single concise markdown summary comment."
-
+    mode_hint = "Produce inline JSON comments only." if RUN_MODE == "inline" else "Produce a single concise markdown summary comment."
     content = f"{mode_hint}\n\n{summary_contract}\n\n{inline_contract}\n\n---\n{prompt}"
 
     resp = client.chat.completions.create(
@@ -127,35 +104,9 @@ def call_model(prompt: str) -> str:
     )
     return resp.choices[0].message.content.strip()
 
+def post_summary_comment(body_md: str):
+    gh_post(f"/repos/{REPO}/issues/{PR_NUMBER}/comments", {"body": body_md})
 
-# ---------------- Single-comment helpers ----------------
-def find_existing_bot_comment_id() -> Optional[int]:
-    page = 1
-    while True:
-        comments = gh_get(
-            f"/repos/{REPO}/issues/{PR_NUMBER}/comments",
-            params={"per_page": 100, "page": page},
-        )
-        if not comments:
-            break
-        for c in comments:
-            if BOT_MARKER in (c.get("body") or ""):
-                return c["id"]
-        if len(comments) < 100:
-            break
-        page += 1
-    return None
-
-def upsert_summary_comment(body_md: str):
-    body_with_marker = f"{BOT_MARKER}\n{body_md}"
-    existing_id = find_existing_bot_comment_id()
-    if existing_id:
-        gh_patch(f"{GITHUB_API}/repos/{REPO}/issues/comments/{existing_id}", {"body": body_with_marker})
-    else:
-        gh_post(f"/repos/{REPO}/issues/{PR_NUMBER}/comments", {"body": body_with_marker})
-
-
-# ---------------- Inline comments ----------------
 def post_inline_review(comments: List[Dict]):
     review_comments = []
     for c in comments:
@@ -165,29 +116,17 @@ def post_inline_review(comments: List[Dict]):
             "path": c["file"],
             "line": int(c["line"]),
             "side": "RIGHT",
-            "body": c["body"],
+            "body": c["body"]
         })
-
     if not review_comments:
-        bullets = "• " + "\n• ".join([c.get("body","") for c in comments if c.get("body")])
-        upsert_summary_comment("> Inline mapping failed, posting summary instead.\n\n" + bullets)
+        post_summary_comment("> Inline mapping failed, posting summary instead.\n\n" +
+                             "• " + "\n• ".join([c.get("body","") for c in comments if c.get("body")]))
         return
+    gh_post(f"/repos/{REPO}/pulls/{PR_NUMBER}/reviews",
+            {"event": "COMMENT", "comments": review_comments})
 
-    gh_post(
-        f"/repos/{REPO}/pulls/{PR_NUMBER}/reviews",
-        {"event": "COMMENT", "comments": review_comments},
-    )
-
-
-# ---------------- Main ----------------
 def main():
     files = get_pr_files()
-
-    # Nothing to review? Post a tiny note (still update-in-place).
-    if not files:
-        upsert_summary_comment("No matching files to review for this PR (check FILTER_PREFIX).")
-        return
-
     model_input = build_model_input(files)
     analysis = call_model(model_input)
 
@@ -198,11 +137,9 @@ def main():
                 post_inline_review(parsed)
                 return
         except json.JSONDecodeError:
-            pass  # fall back to summary
+            pass
 
-    # Summary (single comment updated in place)
-    upsert_summary_comment(analysis)
-
+    post_summary_comment(analysis)
 
 if __name__ == "__main__":
     main()
