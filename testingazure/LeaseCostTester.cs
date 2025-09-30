@@ -14,26 +14,18 @@ namespace TestingAzure
             _blob = new BlobContainerClient(connectionString, container).GetBlobClient(name);
         }
 
-        // BAD: pre-check with ExistsAsync and extra calls; short leases created repeatedly.
-        public async Task<string?> ReadWithLeaseBadAsync()
+        // GOOD: avoid pre-check; attempt read and handle 404. Skip unnecessary lease churn.
+        public async Task<string?> ReadWithLeaseGoodAsync()
         {
-            // Redundant existence check -> extra Read/List call (cost & latency)
-            if (!await _blob.ExistsAsync().ConfigureAwait(false))
-                return null;
-
-            // Create a very short lease repeatedly (unnecessary extra transactions)
-            var leaseClient = _blob.GetBlobLeaseClient();
-            var lease = await leaseClient.AcquireAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-
             try
             {
+                // One operation path — fewer storage transactions
                 var download = await _blob.DownloadContentAsync().ConfigureAwait(false);
                 return download.Value.Content.ToString();
             }
-            finally
+            catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                // Another transaction
-                await leaseClient.ReleaseAsync().ConfigureAwait(false);
+                return null; // blob not found
             }
         }
     }
