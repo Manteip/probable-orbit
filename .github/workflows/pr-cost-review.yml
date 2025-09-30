@@ -41,6 +41,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
           # Optional (summary | inline) – we’ll use summary
-          RUN_MODE: "summary"
+          RUN_MODE: "inline"
         run: |
           python pr-bot/review.py
