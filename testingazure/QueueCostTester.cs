@@ -1,49 +1,105 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using Azure.Messaging.ServiceBus;
-using Azure.Messaging.ServiceBus.Administration;
+using Azure;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 
-namespace TestingAzure
+namespace testingazure
 {
     /// <summary>
-    /// Intentionally inefficient sample to trigger cost recommendations.
-    /// Anti-patterns included:
-    ///  - Create/Dispose ServiceBusClient and Sender for every message
-    ///  - Check queue existence for every send
-    ///  - Send single messages instead of a batch
+    /// Cost-conscious blob access:
+    ///  - Do NOT call Exists() before reads (avoid the extra transaction).
+    ///  - Handle 404 via exception filtering.
+    ///  - Optional bounded parallelism for multiple downloads.
     /// </summary>
-    public class QueueCostTester
+    public class BlobCostTester
     {
-        private readonly string _connectionString;
-        private readonly string _queueName;
+        private readonly BlobContainerClient _container;
 
-        public QueueCostTester(string connectionString, string queueName)
+        public BlobCostTester(BlobContainerClient container)
         {
-            _connectionString = connectionString;
-            _queueName = queueName;
+            _container = container ?? throw new ArgumentNullException(nameof(container));
         }
 
-        public async Task SendIndividuallyAsync(IEnumerable<string> payloads)
+        /// <summary>
+        /// Downloads a blob's content. Returns null if the blob doesn't exist.
+        /// </summary>
+        public async Task<byte[]?> DownloadAsync(string blobName, CancellationToken ct = default)
         {
-            foreach (var p in payloads)
+            var client = _container.GetBlobClient(blobName);
+
+            try
             {
-                // ❌ Anti-pattern: new admin client & existence check for every message
-                var admin = new ServiceBusAdministrationClient(_connectionString);
-                if (!await admin.QueueExistsAsync(_queueName))
-                {
-                    await admin.CreateQueueAsync(_queueName);
-                }
-
-                // ❌ Anti-pattern: create a new client/sender for each message
-                await using var client = new ServiceBusClient(_connectionString);
-                ServiceBusSender sender = client.CreateSender(_queueName);
-
-                // ❌ Anti-pattern: no batching; one message at a time
-                await sender.SendMessageAsync(new ServiceBusMessage(p));
-
-                // ❌ Extra overhead closing every loop; also forces connection churn
-                await sender.CloseAsync();
+                // Single call; no pre-check.
+                var resp = await client.DownloadContentAsync(ct).ConfigureAwait(false);
+                return resp.Value.Content.ToArray();
             }
+            // Treat "not found" as a normal outcome, not a second call.
+            catch (RequestFailedException ex) when (ex.Status == 404)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Downloads many blobs with bounded concurrency.
+        /// </summary>
+        public async Task<IDictionary<string, byte[]>> DownloadManyAsync(
+            IEnumerable<string> blobNames,
+            int maxConcurrency = 8,
+            CancellationToken ct = default)
+        {
+            if (blobNames is null) throw new ArgumentNullException(nameof(blobNames));
+            if (maxConcurrency < 1) maxConcurrency = 1;
+
+            var results = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            var semaphore = new SemaphoreSlim(maxConcurrency);
+
+            var tasks = blobNames.Select(async name =>
+            {
+                await semaphore.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    var data = await DownloadAsync(name, ct).ConfigureAwait(false);
+                    if (data is not null)
+                    {
+                        lock (results)
+                        {
+                            results[name] = data;
+                        }
+                    }
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            return results;
+        }
+
+        /// <summary>
+        /// Example: enumerate blobs and download the first N with bounded concurrency.
+        /// </summary>
+        public async Task<IReadOnlyDictionary<string, byte[]>> DownloadFirstNAsync(
+            int take = 50,
+            int maxConcurrency = 8,
+            CancellationToken ct = default)
+        {
+            var names = new List<string>(take);
+            await foreach (BlobItem item in _container.GetBlobsAsync(cancellationToken: ct))
+            {
+                names.Add(item.Name);
+                if (names.Count >= take) break;
+            }
+
+            var dict = await DownloadManyAsync(names, maxConcurrency, ct).ConfigureAwait(false);
+            return new Dictionary<string, byte[]>(dict);
         }
     }
 }
