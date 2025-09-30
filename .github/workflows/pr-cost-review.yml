@@ -42,7 +42,8 @@ jobs:
 
           # Optional (summary | inline) – we’ll use summary
           RUN_MODE: "summary"
+
            FILTER_PREFIX: "testingazure/"
-           
+
         run: |
           python pr-bot/review.py
