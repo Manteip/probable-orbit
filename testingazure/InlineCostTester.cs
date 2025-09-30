@@ -7,15 +7,12 @@ namespace TestingAzure
     {
         private readonly BlobClient _blob;
 
-        public InlineCostTester(BlobClient blob)
-        {
-            _blob = blob;
-        }
+        public InlineCostTester(BlobClient blob) { _blob = blob; }
 
         public async Task<bool> BlobExistsAsync()
         {
-            // Inefficient existence check – expect inline bot comment here
-            return await _blob.ExistsAsync();
+            // Intentional cost smell so the bot leaves an inline comment:
+            return (await _blob.ExistsAsync()).Value;
         }
     }
 }
