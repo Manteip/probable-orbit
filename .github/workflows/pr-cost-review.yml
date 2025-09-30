@@ -27,10 +27,10 @@ jobs:
 
       - name: Run PR cost review
         env:
-          # Provided automatically
+          # GitHub token (provided automatically)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          # 🔐 Add these in: Settings → Secrets and variables → Actions
+          # 🔐 Azure OpenAI (set these in Settings → Secrets and variables → Actions)
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
           AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
           AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
@@ -40,7 +40,11 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
-          # Optional (summary | inline) – we’ll use summary
+          # Optional (summary | inline). Summary = single comment that updates in place.
           RUN_MODE: "summary"
+
+          # Optional: only review files whose paths start with this prefix (e.g., "testingazure/")
+          FILTER_PREFIX: "testingazure/"
+
         run: |
           python pr-bot/review.py
