@@ -41,7 +41,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
           # Optional (summary | inline). Summary = single comment that updates in place.
-          RUN_MODE: "summary"
+          RUN_MODE: "inline"
 
           # Optional: only review files whose paths start with this prefix (e.g., "testingazure/")
           FILTER_PREFIX: "testingazure/"
